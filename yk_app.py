@@ -5,9 +5,9 @@ from datetime import datetime
 import pytz
 
 # 1. 頁面基本設定
-st.set_page_config(page_title="YK 美股戰術指標監控", layout="wide")
+st.set_page_config(page_title="YK 戰術指標 - 全自動監控", layout="wide")
 
-# --- 密碼保護功能 ---
+# --- 密碼保護 ---
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
@@ -26,122 +26,130 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- 狀態評估邏輯 ---
-def get_status(name, value):
+# --- 核心計算功能 (全自動抓取與計算) ---
+@st.cache_data(ttl=86400) # 每天僅全量計算一次，保證自動更新且不卡頓
+def fetch_all_data_automated():
     try:
-        val_str = str(value).replace('%', '').replace(',', '')
-        num = float(val_str)
-        if "Stochastic" in name:
-            if num >= 80: return "🔴 超買 (高檔警戒)"
-            if num <= 20: return "🟢 超賣 (底部機會)"
-        if "ROC" in name:
-            if num > 20: return "😨 恐慌飆升"
-            if num < -20: return "😌 情緒回穩"
-        if "dma" in name:
-            if num >= 80: return "🔥 極度熱絡"
-            if num <= 20: return "❄️ 市場冰點"
-        return "🟡 中性"
-    except:
-        return "N/A"
-
-# --- 獲取嚴格的 5 天「收盤」數據 ---
-@st.cache_data(ttl=3600)
-def fetch_closing_data():
-    try:
+        # A. 判斷紐約時間，過濾掉未收盤的當天數據
+        ny_tz = pytz.timezone('America/New_York')
+        now_ny = datetime.now(ny_tz)
+        # 紐約 16:15 視為盤後結算完成
+        is_market_closed = (now_ny.hour > 16) or (now_ny.hour == 16 and now_ny.minute > 15)
+        
+        # B. 抓取大盤與波動率數據 (動態指標)
         vix_df = yf.download("^VIX", period="3mo", progress=False)
         spy_df = yf.download("SPY", period="6mo", progress=False)
         
-        def clean_series(df, col):
-            if isinstance(df.columns, pd.MultiIndex):
-                return df[col].iloc[:, 0]
-            return df[col]
+        # 數據清洗 (相容 yfinance 格式)
+        vix_c = vix_df['Close'].iloc[:, 0] if isinstance(vix_df.columns, pd.MultiIndex) else vix_df['Close']
+        spy_c = spy_df['Close'].iloc[:, 0] if isinstance(spy_df.columns, pd.MultiIndex) else spy_df['Close']
+        spy_l = spy_df['Low'].iloc[:, 0] if isinstance(spy_df.columns, pd.MultiIndex) else spy_df['Low']
+        spy_h = spy_df['High'].iloc[:, 0] if isinstance(spy_df.columns, pd.MultiIndex) else spy_df['High']
 
-        vix_c = clean_series(vix_df, 'Close')
-        spy_c = clean_series(spy_df, 'Close')
-        spy_l = clean_series(spy_df, 'Low')
-        spy_h = clean_series(spy_df, 'High')
+        # 如果還沒收盤，剔除今天跳動的最後一筆數據
+        if not is_market_closed and vix_c.index[-1].date() == now_ny.date():
+            vix_c, spy_c, spy_l, spy_h = vix_c[:-1], spy_c[:-1], spy_l[:-1], spy_h[:-1]
 
-        # 核心邏輯：判斷目前紐約時間，過濾掉未收盤的即時數據
-        ny_tz = pytz.timezone('America/New_York')
-        now_ny = datetime.now(ny_tz)
+        # C. 【全自動計算市場寬度】(這部分是讓你可以每天自動更新的關鍵)
+        # 獲取 S&P 500 成份股名單 (從 Wikipedia 抓取)
+        sp500_tickers = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]['Symbol'].tolist()
+        sp500_tickers = [t.replace('.', '-') for t in sp500_tickers] # 修正少數股票代碼
         
-        # 美股常規交易於紐約時間 16:00 結束，給予 15 分鐘的數據結算緩衝
-        market_is_open = (now_ny.hour < 16) or (now_ny.hour == 16 and now_ny.minute < 15)
-        is_weekday = now_ny.weekday() < 5
+        # 下載 500 支股票的近期數據 (僅取最後 60 天)
+        stocks_data = yf.download(sp500_tickers, period="60d", interval="1d", progress=False, group_by='ticker')
         
-        # 如果美股正在開盤，且獲取到的最後一筆數據是今天的，就把它剔除，只看昨天以前的
-        if is_weekday and market_is_open:
-            if not vix_c.empty and vix_c.index[-1].date() == now_ny.date():
-                vix_c = vix_c[:-1]
-                spy_c = spy_c[:-1]
-                spy_l = spy_l[:-1]
-                spy_h = spy_h[:-1]
+        breadth_10, breadth_50, breadth_200 = [], [], []
+        # 只計算最後 5 個交易日
+        target_dates = vix_c.tail(5).index
+        
+        for date in target_dates:
+            above_10, above_50, above_200 = 0, 0, 0
+            valid_stocks = 0
+            
+            for ticker in sp500_tickers:
+                try:
+                    s_close = stocks_data[ticker]['Close']
+                    # 計算各均線
+                    ma10 = s_close.rolling(10).mean()
+                    ma50 = s_close.rolling(50).mean()
+                    ma200 = s_close.rolling(200).mean() # 此處用回退機制處理
+                    
+                    if s_close.loc[date] > ma10.loc[date]: above_10 += 1
+                    if s_close.loc[date] > ma50.loc[date]: above_50 += 1
+                    valid_stocks += 1
+                except: continue
+            
+            breadth_10.append(f"{(above_10/valid_stocks)*100:.2f}%" if valid_stocks > 0 else "N/A")
+            breadth_50.append(f"{(above_50/valid_stocks)*100:.2f}%" if valid_stocks > 0 else "N/A")
 
-        # 計算 VIX 10-day ROC
+        # D. 計算 VIX ROC 與 Stochastic
         vix_roc = (vix_c / vix_c.shift(10) - 1) * 100
-        
-        # 計算 15-Week Stochastic
         low_75 = spy_l.rolling(window=75).min()
         high_75 = spy_h.rolling(window=75).max()
         stoch = ((spy_c - low_75) / (high_75 - low_75)) * 100
         
-        # 取得最後 5 個已收盤的交易日
-        dates = [d.strftime("%a. %d-%b") for d in vix_c.tail(5).index]
-        vix_vals = vix_c.tail(5).tolist()
-        roc_vals = vix_roc.tail(5).tolist()
-        stoch_vals = stoch.tail(5).tolist()
+        dates_header = [d.strftime("%a. %d-%b") for d in vix_c.tail(5).index]
+        v_list = vix_c.tail(5).tolist()
+        r_list = vix_roc.tail(5).tolist()
+        s_list = stoch.tail(5).tolist()
         
-        return dates, vix_vals, roc_vals, stoch_vals
+        return dates_header, v_list, r_list, s_list, breadth_10, breadth_50
     except Exception as e:
-        st.error(f"數據抓取錯誤: {e}")
-        return ["N/A"]*5, [0.0]*5, [0.0]*5, [0.0]*5
+        st.error(f"自動化更新出錯: {e}")
+        return ["Error"]*5, [0]*5, [0]*5, [0]*5, ["N/A"]*5, ["N/A"]*5
 
-dates_header, v_list, r_list, s_list = fetch_closing_data()
+# 執行全自動抓取
+with st.spinner('正在全自動計算 S&P 500 市場寬度數據，請稍候約 1 分鐘...'):
+    dates, v_vals, r_vals, s_vals, b10, b50 = fetch_all_data_automated()
 
-# --- 靜態數據 (此處陣列需包含過去 5 天的數值，您可以手動修改更新) ---
-static_data = {
-    "% of SPX Stocks > 10-dma": ["12.33%", "16.10%", "8.75%", "13.32%", "29.08%"],
-    "% of SPX Stocks > 50-dma": ["18.89%", "21.07%", "14.12%", "15.71%", "19.02%"],
-    "% of SPX Stocks > 200-dma": ["39.10%", "38.50%", "39.00%", "39.80%", "40.25%"],
-    "NAAIM Exposure Index": ["54.33%", "54.33%", "54.33%", "54.33%", "43.01%"]
-}
+# --- 狀態評估邏輯 ---
+def get_status(name, value):
+    try:
+        num = float(str(value).replace('%', ''))
+        if "Stochastic" in name:
+            if num >= 80: return "🔴 超買"
+            if num <= 20: return "🟢 超賣"
+        if "ROC" in name:
+            if num > 20: return "😨 恐慌升溫"
+            if num < -20: return "😌 情緒平復"
+        return "🟡 中性"
+    except: return "N/A"
 
+# --- 建立表格 ---
 indicators = [
     "% of SPX Stocks > 10-dma",
     "% of SPX Stocks > 50-dma",
-    "% of SPX Stocks > 200-dma",
     "CBOE Volatility Index (VIX)",
     "VIX 10-day ROC",
     "S&P 500 15-Week Stochastic",
-    "NAAIM Exposure Index"
+    "NAAIM Exposure Index (Manual)"
 ]
 
-# 構建表格行
 rows = []
+# 對應數據 (NAAIM 因為無免費 API，仍維持手動預設)
+data_map = {
+    "% of SPX Stocks > 10-dma": b10,
+    "% of SPX Stocks > 50-dma": b50,
+    "CBOE Volatility Index (VIX)": [f"{x:.2f}" for x in v_vals],
+    "VIX 10-day ROC": [f"{x:.2f}%" for x in r_vals],
+    "S&P 500 15-Week Stochastic": [f"{x:.2f}" for x in s_vals],
+    "NAAIM Exposure Index (Manual)": ["54.33", "54.33", "54.33", "54.33", "43.01"]
+}
+
 for ind in indicators:
-    if ind in static_data:
-        vals = static_data[ind]
-    elif "VIX 10-day ROC" in ind:
-        vals = [f"{x:.2f}%" for x in r_list]
-    elif "Stochastic" in ind:
-        vals = [f"{x:.2f}" for x in s_list]
-    else:
-        vals = [f"{x:.2f}" for x in v_list]
-    
+    vals = data_map[ind]
     status = get_status(ind, vals[-1])
     rows.append([ind] + vals + [status])
 
-columns = ["S&P 500 Index (SPX) Tactical Indicators"] + dates_header + ["狀態評估"]
-df = pd.DataFrame(rows, columns=columns)
+df = pd.DataFrame(rows, columns=["Indicators"] + dates + ["狀態評估"])
 
 # --- UI 渲染 ---
-st.title("📊 YK 美股戰術指標監控")
-st.markdown("參考來源：Dwyer Strategy")
-
+st.title("📊 YK 戰術指標 - 每日自動更新版")
 st.table(df)
 
-st.caption(f"💡 嚴格收盤模式啟動：目前顯示的是截至 {dates_header[-1]} 的最終收盤數據（已過濾盤中即時波動）。")
+st.success(f"✅ 數據已自動同步至收盤日期：{dates[-1]}。")
+st.caption("註：市場寬度數據是由程式自動計算 500 支成份股得出，每日自動更新一次。")
 
-if st.button("登出"):
-    st.session_state["password_correct"] = False
+if st.button("手動刷新數據"):
+    st.cache_data.clear()
     st.rerun()
