@@ -23,14 +23,12 @@ def check_password():
         return False
     return True
 
-# 如果密碼未通過，停止執行後續程式碼
 if not check_password():
     st.stop()
 
-# --- 狀態評估邏輯 ---
+# --- 狀態評估邏輯 (基於最新一天的數據) ---
 def get_status(name, value):
     try:
-        # 將字串中的 % 符號去掉並轉換為浮點數
         val_str = str(value).replace('%', '')
         num = float(val_str)
         
@@ -50,55 +48,63 @@ def get_status(name, value):
             return "🟡 正常"
             
         if "NAAIM" in name:
-            if num >= 80: return "🐂 經理人極度樂觀"
-            if num <= 20: return "🐻 經理人極度悲觀"
+            if num >= 80: return "🐂 極度樂觀"
+            if num <= 20: return "🐻 極度悲觀"
             return "🟡 正常配置"
             
         return "🟡 觀察中"
     except Exception:
         return "N/A"
 
-# --- 獲取即時數據 (設定每天更新一次) ---
-@st.cache_data(ttl=86400) # ttl=86400秒 (24小時)，確保每天自動更新
-def fetch_dynamic_data():
+# --- 獲取過去 5 天的動態數據 ---
+@st.cache_data(ttl=86400) # 每天自動更新一次
+def fetch_5day_dynamic_data():
     try:
-        # 抓取 VIX 數據 (過去 1 個月，以確保有足夠的 10 天前數據)
-        vix_data = yf.download("^VIX", period="1mo")
-        # 抓取 SPY 數據 (過去 1 年，以計算 15 週隨機指標)
-        spy_data = yf.download("SPY", period="1y", interval="1wk")
+        # 抓取較長週期的數據以確保計算無誤 (ROC需前10天，Stochastic需前75個交易日/約15週)
+        vix_df = yf.download("^VIX", period="2mo")
+        spy_df = yf.download("SPY", period="6mo")
         
-        # 處理最新 VIX 與 10天前的 VIX (ROC 計算)
-        vix_latest = float(vix_data['Close'].iloc[-1].item() if isinstance(vix_data['Close'].iloc[-1], pd.Series) else vix_data['Close'].iloc[-1])
-        vix_10d_ago = float(vix_data['Close'].iloc[-11].item() if isinstance(vix_data['Close'].iloc[-11], pd.Series) else vix_data['Close'].iloc[-11])
-        vix_roc = ((vix_latest / vix_10d_ago) - 1) * 100
+        # 兼容 yfinance 新版 MultiIndex 格式
+        vix_close = vix_df['Close']['^VIX'] if isinstance(vix_df.columns, pd.MultiIndex) else vix_df['Close']
+        spy_close = spy_df['Close']['SPY'] if isinstance(spy_df.columns, pd.MultiIndex) else spy_df['Close']
+        spy_low = spy_df['Low']['SPY'] if isinstance(spy_df.columns, pd.MultiIndex) else spy_df['Low']
+        spy_high = spy_df['High']['SPY'] if isinstance(spy_df.columns, pd.MultiIndex) else spy_df['High']
         
-        # 計算 15-Week Stochastic
-        low_15 = spy_data['Low'].rolling(window=15).min()
-        high_15 = spy_data['High'].rolling(window=15).max()
+        # 計算 VIX 10-day ROC
+        vix_roc = (vix_close / vix_close.shift(10) - 1) * 100
         
-        latest_close = float(spy_data['Close'].iloc[-1].item() if isinstance(spy_data['Close'].iloc[-1], pd.Series) else spy_data['Close'].iloc[-1])
-        latest_low_15 = float(low_15.iloc[-1].item() if isinstance(low_15.iloc[-1], pd.Series) else low_15.iloc[-1])
-        latest_high_15 = float(high_15.iloc[-1].item() if isinstance(high_15.iloc[-1], pd.Series) else high_15.iloc[-1])
+        # 計算 SPY 15-Week Stochastic (使用 75 個交易日作為 15 週的近似值)
+        low_75 = spy_low.rolling(window=75).min()
+        high_75 = spy_high.rolling(window=75).max()
+        stoch_15w = ((spy_close - low_75) / (high_75 - low_75)) * 100
         
-        stoch_15w = ((latest_close - latest_low_15) / (latest_high_15 - latest_low_15)) * 100
+        # 提取最後 5 個交易日的數據
+        last_5_dates = vix_close.index[-5:]
         
-        current_date = datetime.now().strftime("%Y-%m-%d")
+        # 格式化日期作為表格列頭 (例如 "Fri. 22-Sep")
+        formatted_dates = [d.strftime("%a. %d-%b") for d in last_5_dates]
         
-        return current_date, vix_latest, vix_roc, stoch_15w
+        # 提取這 5 天的具體數值
+        vix_vals = vix_close.iloc[-5:].values
+        roc_vals = vix_roc.iloc[-5:].values
+        stoch_vals = stoch_15w.iloc[-5:].values
+        
+        return formatted_dates, vix_vals, roc_vals, stoch_vals
+    
     except Exception as e:
-        # 若抓取失敗的回退機制
-        return datetime.now().strftime("%Y-%m-%d"), 0.0, 0.0, 0.0
+        # 錯誤處理回退
+        return ["Day 1", "Day 2", "Day 3", "Day 4", "Day 5"], [0]*5, [0]*5, [0]*5
 
-# 執行獲取動態數據
-date_str, vix_now, vix_roc_val, stoch_val = fetch_dynamic_data()
+# 執行抓取
+dates, vix_vals, roc_vals, stoch_vals = fetch_5day_dynamic_data()
 
 # --- 建立表格數據 ---
-# 這些是需要手動更新的靜態指標 (市場寬度與 NAAIM 通常無免費 API)
-static_values = {
-    "% of SPX Stocks > 10-dma": "29.08%",
-    "% of SPX Stocks > 50-dma": "19.02%",
-    "% of SPX Stocks > 200-dma": "40.25%",
-    "NAAIM Exposure Index": "43.01%"
+# 靜態指標 (市場寬度與 NAAIM 需手動更新，此處提供 5 天的陣列佔位符，您可以根據實際情況修改)
+static_data = {
+    "% of SPX Stocks > 10-dma": ["12.33%", "16.10%", "8.75%", "13.32%", "29.08%"],
+    "% of SPX Stocks > 50-dma": ["18.89%", "21.07%", "14.12%", "15.71%", "19.02%"],
+    "% of SPX Stocks > 200-dma": ["39.10%", "38.50%", "39.00%", "39.80%", "40.25%"],
+    "NAAIM Exposure Index": ["54.33%", "54.33%", "54.33%", "54.33%", "43.01%"]
 }
 
 indicators = [
@@ -111,33 +117,43 @@ indicators = [
     "NAAIM Exposure Index"
 ]
 
-values = [
-    static_values["% of SPX Stocks > 10-dma"],
-    static_values["% of SPX Stocks > 50-dma"],
-    static_values["% of SPX Stocks > 200-dma"],
-    f"{vix_now:.2f}",
-    f"{vix_roc_val:.2f}%",
-    f"{stoch_val:.2f}",
-    static_values["NAAIM Exposure Index"]
-]
+# 構建每一列的數據
+row_data = []
+for indicator in indicators:
+    if indicator in static_data:
+        # 使用手動更新的靜態數據
+        vals = static_data[indicator]
+        latest_val = vals[-1]
+    else:
+        # 使用動態計算的數據
+        if "VIX 10-day ROC" in indicator:
+            vals = [f"{v:.2f}%" for v in roc_vals]
+        elif "Stochastic" in indicator:
+            vals = [f"{v:.2f}" for v in stoch_vals]
+        else:
+            vals = [f"{v:.2f}" for v in vix_vals]
+        latest_val = vals[-1]
+        
+    # 計算狀態評估 (只看最後一天)
+    status = get_status(indicator, latest_val)
+    
+    # 組合該指標的完整行數據
+    row = [indicator] + vals + [status]
+    row_data.append(row)
 
-# 組合成 DataFrame，完美對齊你截圖中的名稱
-df = pd.DataFrame({
-    "S&P 500 Index (SPX) Tactical Indicators": indicators,
-    "Date (日期)": [date_str] * len(indicators),
-    "Latest Level": values,
-    "Status Assessment (狀態評估)": [get_status(indicators[i], values[i]) for i in range(len(indicators))]
-})
+# 設定 DataFrame 列頭 (指標名稱 + 5天日期 + 狀態評估)
+columns = ["S&P 500 Index (SPX) Tactical Indicators"] + dates + ["最新狀態評估"]
+df = pd.DataFrame(row_data, columns=columns)
 
 # --- UI 渲染 ---
-st.title("📊 YK 美股戰術指標監控")
+st.title("📊 YK 美股戰術指標監控 (5日動態對比)")
 st.markdown("參考來源：Dwyer Strategy | 網址命名：**YK**")
 
-# 顯示表格 (使用 st.dataframe 可以自動適應寬度並隱藏左側索引)
+# 顯示表格 (自適應寬度並隱藏左側索引)
 st.dataframe(df, hide_index=True, use_container_width=True)
 
 st.markdown("---")
-st.markdown("數據已自動更新。來源: Yahoo Finance (VIX 與 Stochastic 動態計算)。指標 1, 2, 3, 7 為基準參考值。")
+st.markdown("數據已自動更新。來源: Yahoo Finance (VIX 與 Stochastic 動態計算)。指標 1, 2, 3, 7 需手動維護過去 5 天陣列。")
 
 # 登出按鈕
 if st.button("登出"):
