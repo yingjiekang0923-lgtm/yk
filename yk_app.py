@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime
 import pytz
+import requests
 
 # 1. Page Configuration
 st.set_page_config(page_title="YK Tactical Indicators", layout="wide")
@@ -46,8 +47,11 @@ def fetch_all_data_automated():
         if not is_market_closed and vix_c.index[-1].date() == now_ny.date():
             vix_c, spy_c, spy_l, spy_h = vix_c[:-1], spy_c[:-1], spy_l[:-1], spy_h[:-1]
 
-        # Fetch S&P 500 components automatically
-        sp500_tickers = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]['Symbol'].tolist()
+        # 🚀 解決 403 Forbidden: 偽裝成普通瀏覽器去抓維基百科
+        url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        html_data = requests.get(url, headers=headers).text
+        sp500_tickers = pd.read_html(html_data)[0]['Symbol'].tolist()
         sp500_tickers = [t.replace('.', '-') for t in sp500_tickers]
         
         stocks_data = yf.download(sp500_tickers, period="60d", interval="1d", progress=False, group_by='ticker')
