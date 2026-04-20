@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
+import pytz
 
 # 1. 頁面基本設定
 st.set_page_config(page_title="YK 美股戰術指標監控", layout="wide")
@@ -43,15 +44,13 @@ def get_status(name, value):
     except:
         return "N/A"
 
-# --- 獲取 5 天收盤數據 ---
+# --- 獲取嚴格的 5 天「收盤」數據 ---
 @st.cache_data(ttl=3600)
 def fetch_closing_data():
     try:
-        # 抓取足夠歷史資料以計算指標
         vix_df = yf.download("^VIX", period="3mo", progress=False)
         spy_df = yf.download("SPY", period="6mo", progress=False)
         
-        # 處理 yfinance 可能產生的 MultiIndex 或 Series
         def clean_series(df, col):
             if isinstance(df.columns, pd.MultiIndex):
                 return df[col].iloc[:, 0]
@@ -62,15 +61,31 @@ def fetch_closing_data():
         spy_l = clean_series(spy_df, 'Low')
         spy_h = clean_series(spy_df, 'High')
 
+        # 核心邏輯：判斷目前紐約時間，過濾掉未收盤的即時數據
+        ny_tz = pytz.timezone('America/New_York')
+        now_ny = datetime.now(ny_tz)
+        
+        # 美股常規交易於紐約時間 16:00 結束，給予 15 分鐘的數據結算緩衝
+        market_is_open = (now_ny.hour < 16) or (now_ny.hour == 16 and now_ny.minute < 15)
+        is_weekday = now_ny.weekday() < 5
+        
+        # 如果美股正在開盤，且獲取到的最後一筆數據是今天的，就把它剔除，只看昨天以前的
+        if is_weekday and market_is_open:
+            if not vix_c.empty and vix_c.index[-1].date() == now_ny.date():
+                vix_c = vix_c[:-1]
+                spy_c = spy_c[:-1]
+                spy_l = spy_l[:-1]
+                spy_h = spy_h[:-1]
+
         # 計算 VIX 10-day ROC
         vix_roc = (vix_c / vix_c.shift(10) - 1) * 100
         
-        # 計算 15-Week Stochastic (約 75 交易日)
+        # 計算 15-Week Stochastic
         low_75 = spy_l.rolling(window=75).min()
         high_75 = spy_h.rolling(window=75).max()
         stoch = ((spy_c - low_75) / (high_75 - low_75)) * 100
         
-        # 取得最後 5 個交易日
+        # 取得最後 5 個已收盤的交易日
         dates = [d.strftime("%a. %d-%b") for d in vix_c.tail(5).index]
         vix_vals = vix_c.tail(5).tolist()
         roc_vals = vix_roc.tail(5).tolist()
@@ -83,7 +98,7 @@ def fetch_closing_data():
 
 dates_header, v_list, r_list, s_list = fetch_closing_data()
 
-# --- 靜態數據 (此處根據您的截圖手動預設，您可自行修改最後一格) ---
+# --- 靜態數據 (此處陣列需包含過去 5 天的數值，您可以手動修改更新) ---
 static_data = {
     "% of SPX Stocks > 10-dma": ["12.33%", "16.10%", "8.75%", "13.32%", "29.08%"],
     "% of SPX Stocks > 50-dma": ["18.89%", "21.07%", "14.12%", "15.71%", "19.02%"],
@@ -113,11 +128,9 @@ for ind in indicators:
     else:
         vals = [f"{x:.2f}" for x in v_list]
     
-    # 狀態評估只針對最後一天的數值
     status = get_status(ind, vals[-1])
     rows.append([ind] + vals + [status])
 
-# 建立 DataFrame
 columns = ["S&P 500 Index (SPX) Tactical Indicators"] + dates_header + ["狀態評估"]
 df = pd.DataFrame(rows, columns=columns)
 
@@ -125,10 +138,9 @@ df = pd.DataFrame(rows, columns=columns)
 st.title("📊 YK 美股戰術指標監控")
 st.markdown("參考來源：Dwyer Strategy")
 
-# 使用 st.table 確保格式跟網頁版一致，不會有捲軸
 st.table(df)
 
-st.caption(f"💡 數據已更新至收盤。最近更新日期：{dates_header[-1]}。數據源：Yahoo Finance / NAAIM")
+st.caption(f"💡 嚴格收盤模式啟動：目前顯示的是截至 {dates_header[-1]} 的最終收盤數據（已過濾盤中即時波動）。")
 
 if st.button("登出"):
     st.session_state["password_correct"] = False
