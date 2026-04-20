@@ -85,7 +85,7 @@ def fetch_all_data_automated():
         
         return dates_header, v_list, r_list, s_list, breadth_10, breadth_50
     except Exception as e:
-        # Fallback mechanism if data fetch fails
+        st.error(f"🚨 Data Fetch Error: {str(e)}")
         return ["Day 1", "Day 2", "Day 3", "Day 4", "Day 5"], [0]*5, [0]*5, [0]*5, ["N/A"]*5, ["N/A"]*5
 
 with st.spinner('Calculating S&P 500 Market Breadth automatically, please wait (~1 min)...'):
