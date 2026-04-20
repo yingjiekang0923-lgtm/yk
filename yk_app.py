@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime
 import pytz
 import requests
-import io  # 👈 新增這個標準庫，用來處理文字流
+import io
 
 # 1. Page Configuration
 st.set_page_config(page_title="YK Tactical Indicators", layout="wide")
@@ -53,7 +53,7 @@ def fetch_all_data_automated():
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
         html_data = requests.get(url, headers=headers).text
         
-        # 這裡強制把 HTML 文字轉成資料流，Pandas 就能看懂了
+        # 這裡強制把 HTML 文字轉成資料流
         sp500_tickers = pd.read_html(io.StringIO(html_data))[0]['Symbol'].tolist()
         sp500_tickers = [t.replace('.', '-') for t in sp500_tickers]
         
@@ -146,4 +146,8 @@ st.title("📊 YK Tactical Indicators - Daily Auto Update")
 st.table(df)
 
 st.success(f"✅ Data successfully synced to closing date: {dates[-1]}.")
-st.caption("Note: Market breadth data (% > 10/50 dma) is automatically
+st.caption("Note: Market breadth data (% > 10/50 dma) is automatically calculated from S&P 500 constituents and updated daily.")
+
+if st.button("Log Out"):
+    st.session_state["password_correct"] = False
+    st.rerun()
